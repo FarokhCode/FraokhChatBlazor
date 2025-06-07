@@ -1,0 +1,102 @@
+﻿@page "/chat"
+
+@rendermode InteractiveWebAssembly
+@inject NavigationManager NavigationManager
+@implements IAsyncDisposable
+
+<PageTitle>Chat</PageTitle>
+
+<h1>Chat</h1>
+
+@if (IsConnected)
+{
+    <div>
+        <input type="text" placeholder="Your name" @bind="inputUser" />
+        <input type="text" placeholder="Your message" @bind="messageInput" />
+        <button class="btn btn-primary" @onclick="Send" disabled="@(!IsConnected)">Send</button>
+    </div>
+    <ul id="messagelist">
+        @foreach (var item in messages)
+        {
+            <li>@item</li>
+        }
+    </ul>
+}
+else
+{
+    <span>Connecting...</span>
+    <button @onclick="Reconnect">Reconnect</button>
+}
+
+@code {
+    private HubConnection hubConnection;
+    private List<string> messages = new List<string>();
+    private string inputUser;
+    private string messageInput;
+
+    public bool IsConnected => hubConnection?.State == HubConnectionState.Connected;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await InitializeHubConnection();
+    }
+
+    private async Task InitializeHubConnection()
+    {
+        hubConnection = new HubConnectionBuilder()
+            .WithUrl(NavigationManager.ToAbsoluteUri("/chathub"))
+            .Build();
+
+        hubConnection.On<string, string>("ReceiveMessage", (user, message) =>
+        {
+            var encodedMessage = $"{user}: {message}";
+            messages.Add(encodedMessage);
+            InvokeAsync(StateHasChanged);
+        });
+
+        hubConnection.Closed += async (error) =>
+        {
+            await InvokeAsync(StateHasChanged);
+            await Task.Delay(new Random().Next(0, 5) * 1000);
+            await InitializeHubConnection();
+        };
+
+        try
+        {
+            await hubConnection.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error starting connection: {ex.Message}");
+        }
+    }
+
+    private async Task Send()
+    {
+        if (!IsConnected || string.IsNullOrWhiteSpace(messageInput))
+            return;
+
+        try
+        {
+            await hubConnection.SendAsync("SendMessage", inputUser, messageInput);
+            messageInput = string.Empty; // Clear input after sending
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error sending message: {ex.Message}");
+        }
+    }
+
+    private async Task Reconnect()
+    {
+        await InitializeHubConnection();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (hubConnection is not null)
+        {
+            await hubConnection.DisposeAsync();
+        }
+    }
+}
