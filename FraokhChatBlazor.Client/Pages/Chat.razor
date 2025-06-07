@@ -1,100 +1,189 @@
 ﻿@page "/chat"
-
+@using Microsoft.AspNetCore.SignalR.Client
 @rendermode InteractiveWebAssembly
-@inject NavigationManager NavigationManager
+@inject NavigationManager Navigation
 @implements IAsyncDisposable
 
-<PageTitle>Chat</PageTitle>
-
-<h1>Chat</h1>
-
-@if (IsConnected)
+@if (!isLoggedIn)
 {
-    <div>
-        <input type="text" placeholder="Your name" @bind="inputUser" />
-        <input type="text" placeholder="Your message" @bind="messageInput" />
-        <button class="btn btn-primary" @onclick="Send" disabled="@(!IsConnected)">Send</button>
+    <div class="login-overlay">
+        <div class="login-box">
+            <h2>Welcome to Messenger</h2>
+            <input class="login-input" @bind="username" placeholder="Enter your name" />
+            <button class="login-btn" @onclick="Login">Continue</button>
+        </div>
     </div>
-    <ul id="messagelist">
-        @foreach (var item in messages)
-        {
-            <li>@item</li>
-        }
-    </ul>
 }
 else
 {
-    <span>Connecting...</span>
-    <button @onclick="Reconnect">Reconnect</button>
+    <div class="chat-container">
+        <!-- User List Sidebar -->
+        <div class="user-list">
+            <div class="user-header">
+                <div class="user-avatar">@GetInitial(username)</div>
+                <div class="user-name">@username</div>
+            </div>
+
+            <div class="search-box">
+                <input class="search-input" placeholder="Search contacts..." />
+            </div>
+
+            <div class="user-items">
+                @foreach (var user in onlineUsers.Where(u => u != username))
+                {
+                    <div class="user-item @(selectedUser == user ? "active" : "")"
+                         @onclick="() => SelectUser(user)">
+                        <div class="user-item-avatar">@GetInitial(user)</div>
+                        <div class="user-item-info">
+                            <div class="user-item-name">@user</div>
+                            <div class="user-item-status">Online</div>
+                        </div>
+                    </div>
+                }
+            </div>
+        </div>
+
+        <!-- Chat Area -->
+        <div class="chat-area">
+            @if (selectedUser != null)
+            {
+                <div class="chat-header">
+                    <div class="user-avatar">@GetInitial(selectedUser)</div>
+                    <div class="user-name">@selectedUser</div>
+                </div>
+
+                <div class="chat-messages">
+                    @foreach (var msg in messages.Where(m => m.Receiver == selectedUser || m.Sender == selectedUser))
+                    {
+                        <div class="message @(msg.Sender == username ? "message-sent" : "message-received")">
+                            <div class="message-bubble">@msg.Text</div>
+                            <div class="message-time">@msg.Time.ToString("h:mm tt")</div>
+                        </div>
+                    }
+                </div>
+
+                <div class="message-input-area">
+                    <input class="message-input" @bind="newMessage" @onkeypress="HandleKeyPress"
+                           placeholder="Type a message..." />
+                    <button class="send-btn" @onclick="SendMessage">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M22 2L11 13" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                            <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                        </svg>
+                    </button>
+                </div>
+            }
+            else
+            {
+                <div class="select-prompt">
+                    <h3>Select a conversation</h3>
+                    <p>Choose from your existing conversations or start a new one</p>
+                </div>
+            }
+        </div>
+    </div>
 }
 
 @code {
+    // Connection
     private HubConnection hubConnection;
-    private List<string> messages = new List<string>();
-    private string inputUser;
-    private string messageInput;
+    private bool isLoggedIn = false;
+    private string username = "";
 
-    public bool IsConnected => hubConnection?.State == HubConnectionState.Connected;
+    // Chat state
+    private List<string> onlineUsers = new();
+    private string selectedUser;
+    private string newMessage = "";
+    private List<ChatMessage> messages = new();
 
+    private class ChatMessage
+    {
+        public string Sender { get; set; }
+        public string Receiver { get; set; }
+        public string Text { get; set; }
+        public DateTime Time { get; set; } = DateTime.Now;
+    }
+    private string GetInitial(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return "";
+        return name.Substring(0, 1).ToUpper();
+    }
     protected override async Task OnInitializedAsync()
     {
-        await InitializeHubConnection();
-    }
-
-    private async Task InitializeHubConnection()
-    {
         hubConnection = new HubConnectionBuilder()
-            .WithUrl(NavigationManager.ToAbsoluteUri("/chathub"))
+            .WithUrl(Navigation.ToAbsoluteUri("/chathub"))
             .Build();
 
-        hubConnection.On<string, string>("ReceiveMessage", (user, message) =>
+        hubConnection.On<string>("UserConnected", (user) =>
         {
-            var encodedMessage = $"{user}: {message}";
-            messages.Add(encodedMessage);
-            InvokeAsync(StateHasChanged);
+            if (!onlineUsers.Contains(user))
+            {
+                onlineUsers.Add(user);
+                StateHasChanged();
+            }
         });
 
-        hubConnection.Closed += async (error) =>
+        hubConnection.On<string>("UserDisconnected", (user) =>
         {
-            await InvokeAsync(StateHasChanged);
-            await Task.Delay(new Random().Next(0, 5) * 1000);
-            await InitializeHubConnection();
-        };
+            onlineUsers.Remove(user);
+            if (selectedUser == user) selectedUser = null;
+            StateHasChanged();
+        });
 
-        try
+        hubConnection.On<List<string>>("ReceiveOnlineUsers", (users) =>
         {
-            await hubConnection.StartAsync();
-        }
-        catch (Exception ex)
+            onlineUsers = users;
+            StateHasChanged();
+        });
+
+        hubConnection.On<string, string>("ReceiveMessage", (sender, message) =>
         {
-            Console.WriteLine($"Error starting connection: {ex.Message}");
+            messages.Add(new ChatMessage { Sender = sender, Receiver = username, Text = message });
+            StateHasChanged();
+        });
+
+        await hubConnection.StartAsync();
+    }
+
+    private void Login()
+    {
+        if (!string.IsNullOrWhiteSpace(username))
+        {
+            isLoggedIn = true;
+            hubConnection.SendAsync("AddUser", username);
         }
     }
 
-    private async Task Send()
+    private void SelectUser(string user)
     {
-        if (!IsConnected || string.IsNullOrWhiteSpace(messageInput))
-            return;
+        selectedUser = user;
+    }
 
-        try
+    private async Task SendMessage()
+    {
+        if (!string.IsNullOrWhiteSpace(newMessage) && selectedUser != null)
         {
-            await hubConnection.SendAsync("SendMessage", inputUser, messageInput);
-            messageInput = string.Empty; // Clear input after sending
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error sending message: {ex.Message}");
+            messages.Add(new ChatMessage { Sender = username, Receiver = selectedUser, Text = newMessage });
+            await hubConnection.SendAsync("SendMessage", selectedUser, newMessage);
+            newMessage = "";
         }
     }
 
-    private async Task Reconnect()
+    private async Task HandleKeyPress(KeyboardEventArgs e)
     {
-        await InitializeHubConnection();
+        if (e.Key == "Enter")
+        {
+            await SendMessage();
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (hubConnection is not null)
+        if (isLoggedIn)
+        {
+            await hubConnection.SendAsync("RemoveUser", username);
+        }
+        if (hubConnection != null)
         {
             await hubConnection.DisposeAsync();
         }
